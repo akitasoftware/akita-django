@@ -34,7 +34,6 @@ import time
 from .har import *
 from django.core.handlers.wsgi import WSGIRequest
 from django.test import Client as DjangoClient
-from django.utils.encoding import iri_to_uri
 from urllib import parse
 
 
