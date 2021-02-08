@@ -69,7 +69,9 @@ class Client(DjangoClient):
         query_string = [Record(name=k, value=v) for k, v in parse.parse_qs(url.query).items()]
 
         headers = [Record(name=k, value=v) for k, v in wsgi.headers.items()]
+        encoded_headers = '\n'.join([f'{k}: {v}' for k, v in wsgi.headers.items()]).encode("utf-8")
         body = wsgi.body.decode("utf-8")
+
         har_request = Request(
             method=wsgi.method,
             url=url.path,
@@ -77,20 +79,16 @@ class Client(DjangoClient):
             cookies=[Record(name=k, value=v) for k, v in wsgi.COOKIES.items()],
             headers=headers,
             queryString=query_string,
-
-            # TODO(cns): Validate PostData encoding.
-            postData=PostData(mimeType=wsgi.content_type, text=body),
-
-            # TODO(cns): Calculate headers size.
-            headersSize=0,
-
-            bodySize=len(body),
+            postData=None if not body else PostData(mimeType=wsgi.content_type, text=body),
+            headersSize=len(encoded_headers),
+            bodySize=len(wsgi.body),
         )
 
         # Build response
         content = response.content.decode("utf-8") if response.content is not None else ''
         headers = {}
-        for x in response.serialize_headers().decode("utf-8").split('\r\n'):
+        serialized_headers = response.serialize_headers()
+        for x in serialized_headers.decode("utf-8").split('\r\n'):
             kv = x.split(':')
             headers[kv[0].strip()] = kv[1].strip()
         har_response = Response(
@@ -101,11 +99,8 @@ class Client(DjangoClient):
             headers=[Record(name=k, value=v) for k, v in headers.items()],
             content=ResponseContent(size=len(content), mimeType=response.get('Content-Type', ''), text=content),
             redirectURL=response.url if 'url' in dir(response) else '',
-
-            # TODO(cns): Calculate headers size.
-            headersSize=0,
-
-            bodySize=len(content),
+            headersSize=len(serialized_headers),
+            bodySize=len(response.content),
         )
 
         return Entry(
@@ -113,4 +108,6 @@ class Client(DjangoClient):
             time=(datetime.datetime.now(datetime.timezone.utc) - start).total_seconds(),
             request=har_request,
             response=har_response,
+            cache=Cache(),
+            timings=Timings(send=0, wait=0, receive=0),
         )

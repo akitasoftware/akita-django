@@ -33,10 +33,33 @@ import json
 import time
 
 from . import __version__
-from pydantic import BaseModel, ValidationError, validator
-from queue import Queue, Empty
+from pydantic import BaseModel, validator
+from queue import Empty, Queue
 from threading import Thread
-from typing import List
+from typing import List, Optional, Union
+
+
+class Number:
+    """
+    Type of a JSON 'number', which may be an int or float.
+    """
+    v: Union[int, float]
+
+    def __init__(self, v: Union[int, float]):
+        self.v = v
+
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, v):
+        if '.' in str(v):
+            return float(v)
+        return int(v)
+
+    def __repr__(self):
+        return str(self.v)
 
 
 class Record(BaseModel):
@@ -44,15 +67,34 @@ class Record(BaseModel):
     value: str
 
 
+class Timings(BaseModel):
+    dns: Optional[Number]
+    connect: Optional[Number]
+    blocked: Optional[Number]
+    send: Number
+    wait: Number
+    receive: Number
+    ssl: Optional[Number]
+
+
+class PostDataParam(BaseModel):
+    name: str
+    value: Optional[str]
+    contentType: Optional[str]
+
+
 class PostData(BaseModel):
     mimeType: str
     text: str
+    params: Optional[List[PostDataParam]]
 
 
 class ResponseContent(BaseModel):
     size: int
     mimeType: str
     text: str
+    compression: Optional[int]
+    encoding: Optional[str]
 
 
 class Request(BaseModel):
@@ -62,7 +104,7 @@ class Request(BaseModel):
     cookies: List[Record]
     headers: List[Record]
     queryString: List[Record]
-    postData: PostData
+    postData: Optional[PostData]
     headersSize: int
     bodySize: int
 
@@ -79,17 +121,57 @@ class Response(BaseModel):
     bodySize: int
 
 
+class CacheEntry(BaseModel):
+    expires: Optional[str]
+    lastAccess: str
+    eTag: str
+    hitCount: int
+    comment: Optional[str]
+
+
+class Cache(BaseModel):
+    beforeRequest: Optional[CacheEntry]
+    afterRequest: Optional[CacheEntry]
+    comment: Optional[str]
+
+
 class Entry(BaseModel):
     startedDateTime: datetime.datetime
-    time: float
+    time: Number
     request: Request
     response: Response
+    cache: Cache
+    timings: Timings
 
     @validator('startedDateTime')
     def datetime_must_have_timezone(cls, v: datetime.datetime):
         if v.tzinfo is None:
             raise ValueError('datetime must be timezone aware')
         return v
+
+
+class Browser(BaseModel):
+    name: str
+    version: str
+    comment: Optional[str]
+
+
+class Creator(BaseModel):
+    name: str
+    version: str
+    comment: Optional[str]
+
+
+class HarLog(BaseModel):
+    version: str
+    creator: Creator
+    browser: Optional[Browser]
+    entries: List[Entry]
+    comment: Optional[str]
+
+
+class Har(BaseModel):
+    log: HarLog
 
 
 def _default_har_json_serialization(x):
@@ -128,7 +210,7 @@ class HarWriter:
         sep = '' if self.first_entry else ', '
         self.first_entry = False
 
-        self.queue.put(sep + json.dumps(entry.dict(), default=_default_har_json_serialization))
+        self.queue.put(sep + json.dumps(entry.dict(exclude_defaults=True), default=_default_har_json_serialization))
 
     def close(self):
         # Close the entries array and the enclosing HAR JSON object.
