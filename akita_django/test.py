@@ -29,9 +29,13 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
+import datetime
 import time
 
-from .har import *
+import akita_har.models as M
+
+from . import __version__
+from akita_har import HarWriter
 from django.core.handlers.wsgi import WSGIRequest
 from django.test import Client as DjangoClient
 from urllib import parse
@@ -45,7 +49,17 @@ class Client(DjangoClient):
 
     def __init__(self, *args, har_file_path=f'akita_trace_{time.time()}.har', **kwargs):
         super().__init__(*args, **kwargs)
-        self.har_writer = HarWriter(har_file_path, 'w')
+        creator = M.Creator(
+            name="Akita DjangoClient",
+            version=__version__,
+            comment="https://docs.akita.software/docs/integrate-with-django",
+        )
+        browser = M.Browser(
+            name="",
+            version="",
+        )
+        comment = "Created by the Akita DjangoClient."
+        self.har_writer = HarWriter(har_file_path, 'w', creator=creator, browser=browser, comment=comment)
 
     def request(self, **request):
         start = datetime.datetime.now(datetime.timezone.utc)
@@ -57,7 +71,7 @@ class Client(DjangoClient):
     def close(self):
         self.har_writer.close()
 
-    def _entry_of_wsgi(self, start: datetime, request, response) -> Entry:
+    def _entry_of_wsgi(self, start: datetime, request, response) -> M.Entry:
         wsgi = WSGIRequest(self._base_environ(**request))
 
         # Build request
@@ -66,20 +80,20 @@ class Client(DjangoClient):
             server_protocol = wsgi.environ['SERVER_PROTOCOL']
 
         url = parse.urlsplit(wsgi.get_raw_uri())
-        query_string = [Record(name=k, value=v) for k, v in parse.parse_qs(url.query).items()]
+        query_string = [M.Record(name=k, value=v) for k, v in parse.parse_qs(url.query).items()]
 
-        headers = [Record(name=k, value=v) for k, v in wsgi.headers.items()]
+        headers = [M.Record(name=k, value=v) for k, v in wsgi.headers.items()]
         encoded_headers = '\n'.join([f'{k}: {v}' for k, v in wsgi.headers.items()]).encode("utf-8")
         body = wsgi.body.decode("utf-8")
 
-        har_request = Request(
+        har_request = M.Request(
             method=wsgi.method,
             url=url.path,
             httpVersion=server_protocol,
-            cookies=[Record(name=k, value=v) for k, v in wsgi.COOKIES.items()],
+            cookies=[M.Record(name=k, value=v) for k, v in wsgi.COOKIES.items()],
             headers=headers,
             queryString=query_string,
-            postData=None if not body else PostData(mimeType=wsgi.content_type, text=body),
+            postData=None if not body else M.PostData(mimeType=wsgi.content_type, text=body),
             headersSize=len(encoded_headers),
             bodySize=len(wsgi.body),
         )
@@ -91,23 +105,23 @@ class Client(DjangoClient):
         for x in serialized_headers.decode("utf-8").split('\r\n'):
             kv = x.split(':')
             headers[kv[0].strip()] = kv[1].strip()
-        har_response = Response(
+        har_response = M.Response(
             status=response.status_code,
             statusText=response.reason_phrase,
             httpVersion=server_protocol,
-            cookies=[Record(name=k, value=v.value) for k, v in response.cookies.items()],
-            headers=[Record(name=k, value=v) for k, v in headers.items()],
-            content=ResponseContent(size=len(content), mimeType=response.get('Content-Type', ''), text=content),
+            cookies=[M.Record(name=k, value=v.value) for k, v in response.cookies.items()],
+            headers=[M.Record(name=k, value=v) for k, v in headers.items()],
+            content=M.ResponseContent(size=len(content), mimeType=response.get('Content-Type', ''), text=content),
             redirectURL=response.url if 'url' in dir(response) else '',
             headersSize=len(serialized_headers),
             bodySize=len(response.content),
         )
 
-        return Entry(
+        return M.Entry(
             startedDateTime=start,
             time=(datetime.datetime.now(datetime.timezone.utc) - start).total_seconds(),
             request=har_request,
             response=har_response,
-            cache=Cache(),
-            timings=Timings(send=0, wait=0, receive=0),
+            cache=M.Cache(),
+            timings=M.Timings(send=0, wait=0, receive=0),
         )
