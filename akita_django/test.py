@@ -34,11 +34,77 @@ import time
 
 import akita_har.models as M
 
-from . import __version__
 from akita_har import HarWriter
 from django.core.handlers.wsgi import WSGIRequest
+from django.http import HttpResponse
 from django.test import Client as DjangoClient
 from urllib import parse
+
+from . import __version__
+
+
+def django_to_har_entry(start: datetime, request: WSGIRequest, response: HttpResponse) -> M.Entry:
+    """
+    Converts a Django request/response pair to a HAR file entry.
+    :param start: The start of the request, which must be timezone-aware.
+    :param request: A Django request, as produced by django.test.RequestFactory.
+    :param response: The response from your Django service.
+    :return: A HAR file entry.
+    """
+    if start.tzinfo is None:
+        raise ValueError('start datetime must be timezone-aware')
+
+    # Build request
+    server_protocol = 'HTTP/1.1'
+    if 'SERVER_PROTOCOL' in request.environ:
+        server_protocol = request.environ['SERVER_PROTOCOL']
+
+    url = parse.urlsplit(request.get_raw_uri())
+    query_string = [M.Record(name=k, value=v) for k, v in parse.parse_qs(url.query).items()]
+
+    headers = [M.Record(name=k, value=v) for k, v in request.headers.items()]
+    encoded_headers = '\n'.join([f'{k}: {v}' for k, v in request.headers.items()]).encode("utf-8")
+    body = request.body.decode("utf-8")
+
+    har_request = M.Request(
+        method=request.method,
+        url=url.path,
+        httpVersion=server_protocol,
+        cookies=[M.Record(name=k, value=v) for k, v in request.COOKIES.items()],
+        headers=headers,
+        queryString=query_string,
+        postData=None if not body else M.PostData(mimeType=request.content_type, text=body),
+        headersSize=len(encoded_headers),
+        bodySize=len(request.body),
+    )
+
+    # Build response
+    content = response.content.decode("utf-8") if response.content is not None else ''
+    headers = {}
+    serialized_headers = response.serialize_headers()
+    for x in serialized_headers.decode("utf-8").split('\r\n'):
+        kv = x.split(':')
+        headers[kv[0].strip()] = kv[1].strip()
+    har_response = M.Response(
+        status=response.status_code,
+        statusText=response.reason_phrase,
+        httpVersion=server_protocol,
+        cookies=[M.Record(name=k, value=v.value) for k, v in response.cookies.items()],
+        headers=[M.Record(name=k, value=v) for k, v in headers.items()],
+        content=M.ResponseContent(size=len(content), mimeType=response.get('Content-Type', ''), text=content),
+        redirectURL=response.url if 'url' in dir(response) else '',
+        headersSize=len(serialized_headers),
+        bodySize=len(response.content),
+    )
+
+    return M.Entry(
+        startedDateTime=start,
+        time=(datetime.datetime.now(datetime.timezone.utc) - start).total_seconds(),
+        request=har_request,
+        response=har_response,
+        cache=M.Cache(),
+        timings=M.Timings(send=0, wait=0, receive=0),
+    )
 
 
 class Client(DjangoClient):
@@ -63,65 +129,12 @@ class Client(DjangoClient):
 
     def request(self, **request):
         start = datetime.datetime.now(datetime.timezone.utc)
+        wsgi_request = WSGIRequest(self._base_environ(**request))
         response = super().request(**copy.deepcopy(request))
-        self.har_writer.write_entry(self._entry_of_wsgi(start, request, response))
+        self.har_writer.write_entry(django_to_har_entry(start, wsgi_request, response))
 
         return response
 
     def close(self):
         self.har_writer.close()
 
-    def _entry_of_wsgi(self, start: datetime, request, response) -> M.Entry:
-        wsgi = WSGIRequest(self._base_environ(**request))
-
-        # Build request
-        server_protocol = 'HTTP/1.1'
-        if 'SERVER_PROTOCOL' in wsgi.environ:
-            server_protocol = wsgi.environ['SERVER_PROTOCOL']
-
-        url = parse.urlsplit(wsgi.get_raw_uri())
-        query_string = [M.Record(name=k, value=v) for k, v in parse.parse_qs(url.query).items()]
-
-        headers = [M.Record(name=k, value=v) for k, v in wsgi.headers.items()]
-        encoded_headers = '\n'.join([f'{k}: {v}' for k, v in wsgi.headers.items()]).encode("utf-8")
-        body = wsgi.body.decode("utf-8")
-
-        har_request = M.Request(
-            method=wsgi.method,
-            url=url.path,
-            httpVersion=server_protocol,
-            cookies=[M.Record(name=k, value=v) for k, v in wsgi.COOKIES.items()],
-            headers=headers,
-            queryString=query_string,
-            postData=None if not body else M.PostData(mimeType=wsgi.content_type, text=body),
-            headersSize=len(encoded_headers),
-            bodySize=len(wsgi.body),
-        )
-
-        # Build response
-        content = response.content.decode("utf-8") if response.content is not None else ''
-        headers = {}
-        serialized_headers = response.serialize_headers()
-        for x in serialized_headers.decode("utf-8").split('\r\n'):
-            kv = x.split(':')
-            headers[kv[0].strip()] = kv[1].strip()
-        har_response = M.Response(
-            status=response.status_code,
-            statusText=response.reason_phrase,
-            httpVersion=server_protocol,
-            cookies=[M.Record(name=k, value=v.value) for k, v in response.cookies.items()],
-            headers=[M.Record(name=k, value=v) for k, v in headers.items()],
-            content=M.ResponseContent(size=len(content), mimeType=response.get('Content-Type', ''), text=content),
-            redirectURL=response.url if 'url' in dir(response) else '',
-            headersSize=len(serialized_headers),
-            bodySize=len(response.content),
-        )
-
-        return M.Entry(
-            startedDateTime=start,
-            time=(datetime.datetime.now(datetime.timezone.utc) - start).total_seconds(),
-            request=har_request,
-            response=har_response,
-            cache=M.Cache(),
-            timings=M.Timings(send=0, wait=0, receive=0),
-        )
